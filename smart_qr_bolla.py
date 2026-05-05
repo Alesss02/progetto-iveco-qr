@@ -183,6 +183,14 @@ else:
 
     with t2:
         if st.session_state.db:
+
+st.download_button(
+    label="📥 Scarica Database CSV",
+    data=df.to_csv().encode('utf-8'),
+    file_name='estrazione_bolle.csv',
+    mime='text/csv',
+)
+            
             df = pd.DataFrame.from_dict(st.session_state.db, orient='index')
             df['Minuti'] = (df['tempo_sec'] // 60).astype(int)
             st.dataframe(df[['veicolo', 'tecnico', 'stato_lavoro', 'Minuti']], use_container_width=True)
