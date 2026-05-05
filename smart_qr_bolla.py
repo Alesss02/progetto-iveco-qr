@@ -12,21 +12,27 @@ import os
 DB_FILE = "database_bolle.csv"
 
 def carica_db():
-    """Carica i dati dal file CSV se esiste, altrimenti restituisce un dizionario vuoto"""
     if os.path.exists(DB_FILE):
         try:
-            return pd.read_csv(DB_FILE, index_col=0).to_dict('index')
+            # Per evitare problemi con dati complessi (come i dizionari annidati), 
+            # leggiamo e valutiamo correttamente le stringhe del CSV
+            import ast
+            df = pd.read_csv(DB_FILE, index_col=0)
+            db_dict = df.to_dict('index')
+            # Riconvertiamo le stringhe in dizionari per le checklist
+            for k, v in db_dict.items():
+                if isinstance(v.get('checklist_state'), str):
+                    v['checklist_state'] = ast.literal_eval(v['checklist_state'])
+            return db_dict
         except Exception:
             return {}
     return {}
 
 def salva_db(db):
-    """Salva il dizionario corrente nel file CSV"""
     if db:
         df = pd.DataFrame.from_dict(db, orient='index')
         df.to_csv(DB_FILE)
 
-# Inizializzazione del database nella sessione corrente
 if 'db_bolle' not in st.session_state:
     st.session_state['db_bolle'] = carica_db()
 
@@ -36,7 +42,6 @@ if 'db_bolle' not in st.session_state:
 CATEGORIE = ['Motore', 'Elettronica', 'Freni', 'Cambio']
 TECNICI = ['Marco', 'Luca', 'Antonio', 'Davide', 'Roberto']
 
-# Checklist basate su dati storici per prevenire rework (Industria 5.0)
 CHECKLIST_PREDITTIVE = {
     'Motore': [
         {"task": "Serraggio testata a coppia specifica", "risk": "ALTO", "info": "Rework storico: 30% per perdite olio"},
@@ -61,7 +66,6 @@ CHECKLIST_PREDITTIVE = {
 # 3. FUNZIONI TECNICHE (QR & URL)
 # ==============================================================================
 def genera_qr_bytes(link):
-    """Genera i byte dell'immagine QR per visualizzazione e download"""
     qr = qrcode.QRCode(version=1, box_size=10, border=4)
     qr.add_data(link)
     qr.make(fit=True)
@@ -71,7 +75,6 @@ def genera_qr_bytes(link):
     return buf.getvalue()
 
 def get_base_url():
-    """Identifica l'URL corretto per il QR Code"""
     host = st.context.headers.get("Host", "localhost:8501")
     protocol = "https" if "streamlit.app" in host else "http"
     return f"{protocol}://{host}"
@@ -81,7 +84,6 @@ def get_base_url():
 # ==============================================================================
 st.set_page_config(page_title="IVECO Smart Hub 5.0", page_icon="🚚", layout="wide")
 
-# Gestione della navigazione tramite Query Parameters (QR Code scan)
 query_params = st.query_params
 
 # --- VISTA OPERATORE (Attivata dal QR Code) ---
@@ -95,6 +97,13 @@ if 'bolla_id' in query_params:
             st.rerun()
     else:
         bolla = st.session_state['db_bolle'][b_id]
+        
+        # Inizializzatori di sicurezza per le vecchie bolle salvate senza questi campi
+        if 'checklist_state' not in bolla: bolla['checklist_state'] = {}
+        if 'storico_note' not in bolla: bolla['storico_note'] = ""
+        # Assicuriamoci che non sia un "nan" (Not a Number) da pandas se vuoto
+        if pd.isna(bolla['storico_note']): bolla['storico_note'] = ""
+
         st.title(f"🛠️ Protocollo Lavoro: {bolla['veicolo']}")
         
         col_info1, col_info2 = st.columns(2)
@@ -105,26 +114,47 @@ if 'bolla_id' in query_params:
             st.metric("Tecnico Attuale", bolla['tecnico'])
             st.write(f"**Data Ingresso:** {bolla['data']}")
 
+        # Sezione Note dal Turno Precedente (Ben visibile in alto!)
+        if bolla['storico_note']:
+            st.warning(f"📝 **NOTE DAL TURNO PRECEDENTE / HANDOVER:**\n\n{bolla['storico_note']}")
+
         st.subheader("📋 Checklist Intelligente Anti-Errore")
         tasks = CHECKLIST_PREDITTIVE.get(bolla['categoria'], [])
         
         for i, item in enumerate(tasks):
             color = "🔴" if item['risk'] == "ALTO" else "🟡"
-            st.checkbox(f"{color} {item['task']} (Rischio: {item['risk']})", key=f"check_{b_id}_{i}")
+            
+            # Leggiamo lo stato salvato nel database (di default False)
+            is_checked_db = bolla['checklist_state'].get(str(i), False)
+            
+            # Creiamo la checkbox impostando il valore iniziale dal database
+            check_val = st.checkbox(f"{color} {item['task']} (Rischio: {item['risk']})", value=is_checked_db, key=f"check_{b_id}_{i}")
             st.caption(f"💡 *Perché farlo? {item['info']}*")
+            
+            # Aggiorniamo in tempo reale l'oggetto bolla
+            bolla['checklist_state'][str(i)] = check_val
 
         st.divider()
-        st.subheader("🤝 Passaggio di Turno / Note")
+        st.subheader("🤝 Passaggio di Turno / Aggiornamento")
         nuovo_tec = st.selectbox("Passa il lavoro a:", ["Mantieni attuale"] + TECNICI)
-        note_op = st.text_area("Note per il prossimo tecnico / Report finale")
+        
+        # Mostriamo le vecchie note nella text_area così l'operatore può continuarle
+        note_op = st.text_area("Aggiungi o modifica note per il prossimo tecnico:", value=bolla['storico_note'])
 
         if st.button("💾 AGGIORNA E SALVA", type="primary", use_container_width=True):
+            # Aggiorna il tecnico
             if nuovo_tec != "Mantieni attuale":
                 st.session_state['db_bolle'][b_id]['tecnico'] = nuovo_tec
             
+            # Aggiorna le note
+            st.session_state['db_bolle'][b_id]['storico_note'] = note_op
+            
+            # Salva tutto nel CSV
             salva_db(st.session_state['db_bolle'])
             st.success("✅ Dati salvati nel database centrale!")
-            st.balloons()
+            
+            # Forza un ricaricamento della pagina per mostrare istantaneamente l'aggiornamento (es. le note in alto)
+            st.rerun()
 
         if st.button("⬅️ Torna alla lista completa"):
             st.query_params.clear()
@@ -150,17 +180,18 @@ else:
 
         if submit and targa:
             id_gen = f"IVECO-{random.randint(1000, 9999)}"
-            # Registrazione nel database
+            # Registrazione nel database con i nuovi campi inizializzati
             st.session_state['db_bolle'][id_gen] = {
                 "veicolo": targa,
                 "categoria": categoria,
                 "tecnico": tecnico_init,
                 "descrizione": note_acc,
-                "data": datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+                "data": datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "checklist_state": {}, # Per memorizzare lo stato delle spunte
+                "storico_note": note_acc # Le prime note sono quelle dell'accettatore
             }
             salva_db(st.session_state['db_bolle'])
             
-            # Generazione QR
             url_lavoro = f"{get_base_url()}?bolla_id={id_gen}"
             qr_bytes = genera_qr_bytes(url_lavoro)
             
@@ -180,6 +211,7 @@ else:
         if st.session_state['db_bolle']:
             df_view = pd.DataFrame.from_dict(st.session_state['db_bolle'], orient='index')
             st.subheader("Stato Avanzamento Lavori")
+            # Mostriamo la tabella
             st.dataframe(df_view[['veicolo', 'categoria', 'tecnico', 'data']], use_container_width=True)
             
             if st.button("🗑️ Reset Database (Attenzione: azione irreversibile)"):
