@@ -1,6 +1,5 @@
 import streamlit as st
 import qrcode
-from io import BytesIO
 import pandas as pd
 import datetime
 import time
@@ -8,340 +7,206 @@ import random
 import os
 import ast
 import base64
+from io import BytesIO
 from PIL import Image
 
 # ==============================================================================
-# 1. GESTIONE DATABASE E IMMAGINI
+# 1. CONFIGURAZIONI E DATI DI BASE
 # ==============================================================================
 DB_FILE = "database_bolle.csv"
+CATEGORIE = ['Motore', 'Elettronica', 'Freni', 'Cambio']
+TECNICI = ['Marco', 'Luca', 'Antonio', 'Davide', 'Roberto']
+RICAMBI_CATALOGO = ["Olio 5W30", "Filtro Aria", "Pasticche Freni", "Cinghia", "Sensore NOx"]
+
+CHECKLIST_DATA = {
+    'Motore': [
+        {"task": "Serraggio Testata", "risk": "ALTO", "eco": False},
+        {"task": "Test Efficienza Termica", "risk": "BASSO", "eco": True}
+    ],
+    'Cambio': [
+        {"task": "Allineamento Ingranaggi", "risk": "ALTO", "eco": False},
+        {"task": "Recupero Olio Esausto", "risk": "MEDIO", "eco": True}
+    ],
+    'Freni': [
+        {"task": "Verifica Spessore Dischi", "risk": "ALTO", "eco": False},
+        {"task": "Smaltimento Polveri", "risk": "MEDIO", "eco": True}
+    ],
+    'Elettronica': [
+        {"task": "Diagnosi Errori DTC", "risk": "MEDIO", "eco": False},
+        {"task": "Ottimizzazione Centralina", "risk": "BASSO", "eco": True}
+    ]
+}
+
+# ==============================================================================
+# 2. MOTORE DI GESTIONE DATI (DATABASE)
+# ==============================================================================
+def safe_eval(val, default):
+    """Converte stringhe in oggetti Python (liste/dict) senza crashare."""
+    if not isinstance(val, str) or val == "" or pd.isna(val):
+        return default
+    try:
+        return ast.literal_eval(val)
+    except:
+        return default
 
 def carica_db():
-    if os.path.exists(DB_FILE):
-        try:
-            import ast
-            df = pd.read_csv(DB_FILE, index_col=0)
-            # Riempiamo i buchi (NaN) prima di convertire in dizionario
-            df['tempo_sec'] = df['tempo_sec'].fillna(0.0)
-            df['stato_lavoro'] = df['stato_lavoro'].fillna("In Attesa")
-            
-            db_dict = df.to_dict('index')
-            for k, v in db_dict.items():
-                # Forza checklist_state a essere un dizionario, mai NaN o stringa corrotta
-                if not isinstance(v.get('checklist_state'), str) or v.get('checklist_state') == "" or pd.isna(v.get('checklist_state')):
-                    v['checklist_state'] = {}
-                else:
-                    try:
-                        v['checklist_state'] = ast.literal_eval(v['checklist_state'])
-                    except:
-                        v['checklist_state'] = {}
-                
-                # Forza ricambi_usati a essere una lista
-                if not isinstance(v.get('ricambi_usati'), str) or pd.isna(v.get('ricambi_usati')):
-                    v['ricambi_usati'] = []
-                else:
-                    try:
-                        v['ricambi_usati'] = ast.literal_eval(v['ricambi_usati'])
-                    except:
-                        v['ricambi_usati'] = []
-            return db_dict
-        except Exception as e:
-            st.error(f"Errore critico DB: {e}")
-            return {}
-    return {}
+    if not os.path.exists(DB_FILE):
+        return {}
+    try:
+        df = pd.read_csv(DB_FILE, index_col=0)
+        # Pulizia preventiva NaN
+        df = df.fillna({
+            'tempo_sec': 0.0, 'stato_lavoro': 'In Attesa', 
+            'foto_b64': '', 'checklist_state': '{}', 'ricambi_usati': '[]'
+        })
+        db_dict = df.to_dict('index')
+        for k, v in db_dict.items():
+            v['checklist_state'] = safe_eval(v['checklist_state'], {})
+            v['ricambi_usati'] = safe_eval(v['ricambi_usati'], [])
+        return db_dict
+    except:
+        return {}
 
 def salva_db(db):
     if db:
         df = pd.DataFrame.from_dict(db, orient='index')
         df.to_csv(DB_FILE)
 
-if 'db_bolle' not in st.session_state:
-    st.session_state['db_bolle'] = carica_db()
+# Inizializzazione Session State
+if 'db' not in st.session_state:
+    st.session_state.db = carica_db()
 
-def comprimi_e_codifica_immagine(upload):
-    """Comprime la foto scattata e la converte in testo per salvarla nel CSV"""
+# ==============================================================================
+# 3. FUNZIONI UTILITY
+# ==============================================================================
+def encode_img(upload):
     img = Image.open(upload)
-    img.thumbnail((600, 600)) # Ridimensionamento per evitare CSV troppo pesanti
+    img.thumbnail((500, 500)) # Compressione per CSV leggero
     buf = BytesIO()
     img.save(buf, format="JPEG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+    return base64.b64encode(buf.getvalue()).decode()
+
+def get_qr(url):
+    qr = qrcode.make(url)
+    buf = BytesIO()
+    qr.save(buf, format="PNG")
+    return buf.getvalue()
 
 # ==============================================================================
-# 2. CONFIGURAZIONI & LOGICA BUSINESS
+# 4. INTERFACCIA UTENTE (UI)
 # ==============================================================================
-CATEGORIE = ['Motore', 'Elettronica', 'Freni', 'Cambio']
-TECNICI = ['Marco', 'Luca', 'Antonio', 'Davide', 'Roberto']
-CATALOGO_RICAMBI = [
-    "Olio Motore 5W30 (Litri)", "Filtro Olio", "Guarnizione Testata", 
-    "Pasticche Freni Ant.", "Pasticche Freni Post.", "Sensore NOx", 
-    "Cinghia Distribuzione", "Liquido Radiatore", "Cablaggio Alta Tensione"
-]
+st.set_page_config(page_title="IVECO Smart Hub 5.0", layout="wide")
 
-# Aggiunto il parametro 'is_eco' per calcolare le statistiche di Exergia/Sostenibilità
-CHECKLIST_PREDITTIVE = {
-    'Motore': [
-        {"task": "Serraggio testata a coppia specifica", "risk": "ALTO", "info": "Rework: 30%", "is_eco": False},
-        {"task": "Verifica efficienza termica (Exergia)", "risk": "BASSO", "info": "Ottimizzazione consumi", "is_eco": True}
-    ],
-    'Cambio': [
-        {"task": "Verifica tolleranze ingranaggi", "risk": "ALTO", "info": "Critico", "is_eco": False},
-        {"task": "Recupero fluido trasmissione esausto", "risk": "MEDIO", "info": "LCA / Ambiente", "is_eco": True}
-    ],
-    'Freni': [
-        {"task": "Misurazione spessore dischi", "risk": "ALTO", "info": "Sicurezza", "is_eco": False},
-        {"task": "Smaltimento corretto polveri frenanti", "risk": "MEDIO", "info": "Salute e Sicurezza", "is_eco": True}
-    ],
-    'Elettronica': [
-        {"task": "Scansione errori centralina (DTC)", "risk": "MEDIO", "info": "Evita ritorno", "is_eco": False},
-        {"task": "Calibrazione sensori per risparmio carburante", "risk": "BASSO", "info": "Risparmio energetico", "is_eco": True}
-    ]
-}
+# Routing: Operatore (se presente ID in URL) o Manager
+params = st.query_params
+b_id = params.get("bolla_id")
 
-# ==============================================================================
-# 3. INTERFACCIA UTENTE E ROUTING
-# ==============================================================================
-st.set_page_config(page_title="IVECO Smart Hub 5.0", page_icon="🏭", layout="wide")
-
-query_params = st.query_params
-
-# ------------------------------------------------------------------------------
-# VISTA 1: INTERFACCIA OPERATORE (QR CODE)
-# ------------------------------------------------------------------------------
-if 'bolla_id' in query_params:
-    b_id = query_params['bolla_id']
-    
-    if b_id not in st.session_state['db_bolle']:
-        st.error("⚠️ Bolla non trovata.")
-        if st.button("Torna alla Home"): st.query_params.clear(); st.rerun()
+# --- VISTA OPERATORE ---
+if b_id:
+    if b_id not in st.session_state.db:
+        st.error("Bolla non trovata.")
+        if st.button("Torna Home"): st.query_params.clear(); st.rerun()
     else:
-        bolla = st.session_state['db_bolle'][b_id]
+        bolla = st.session_state.db[b_id]
+        st.title(f"🛠️ {bolla['veicolo']} ({b_id})")
         
-        # Gestione sicurezza campi vecchi
-        for field in ['checklist_state', 'ricambi_usati']:
-            if field not in bolla: bolla[field] = {} if field == 'checklist_state' else []
-        for field in ['storico_note', 'foto_b64']:
-            if field not in bolla: bolla[field] = ""
-        for field in ['tempo_sec', 'inizio_timestamp']:
-            if field not in bolla: bolla[field] = 0.0
-        if 'stato_lavoro' not in bolla: bolla['stato_lavoro'] = "In Attesa"
-
-        st.title(f"🛠️ Intervento: {bolla['veicolo']}")
+        # 1. Timer e Stato
+        c1, c2 = st.columns(2)
+        c1.metric("Stato", bolla['stato_lavoro'])
+        c2.metric("Minuti Lavorati", int(bolla.get('tempo_sec', 0) // 60))
         
-        # TIMBRATURA E STATO LAVORO (Miglioria 1)
-        st.subheader("⏱️ Log Attività")
-        col_t1, col_t2 = st.columns(2)
-        with col_t1:
-            st.metric("Stato Attuale", bolla['stato_lavoro'])
-        with col_t2:
-            minuti_lavorati = int(bolla['tempo_sec'] // 60)
-            st.metric("Tempo Registrato (Minuti)", minuti_lavorati)
-
-        if bolla['stato_lavoro'] in ["In Attesa", "Sospeso"]:
-            if st.button("▶️ INIZIA / RIPRENDI LAVORO", type="primary", use_container_width=True):
-                bolla['inizio_timestamp'] = time.time()
-                bolla['stato_lavoro'] = "In Corso"
-                salva_db(st.session_state['db_bolle'])
-                st.rerun()
-        elif bolla['stato_lavoro'] == "In Corso":
-            st.warning("🔄 Lavoro attualmente in esecuzione...")
-            col_b1, col_b2 = st.columns(2)
-            with col_b1:
-                if st.button("⏸️ SOSPENDI (Pausa/Fine Turno)", use_container_width=True):
-                    delta = time.time() - bolla['inizio_timestamp']
-                    bolla['tempo_sec'] += delta
-                    bolla['stato_lavoro'] = "Sospeso"
-                    salva_db(st.session_state['db_bolle'])
-                    st.rerun()
-            with col_b2:
-                if st.button("✅ COMPLETA INTERVENTO", type="primary", use_container_width=True):
-                    delta = time.time() - bolla['inizio_timestamp']
-                    bolla['tempo_sec'] += delta
+        if bolla['stato_lavoro'] != "Completato":
+            if bolla['stato_lavoro'] == "In Corso":
+                if st.button("⏸️ SOSPENDI / FINE LAVORO", type="primary"):
+                    delta = time.time() - bolla.get('last_start', time.time())
+                    bolla['tempo_sec'] = bolla.get('tempo_sec', 0) + delta
                     bolla['stato_lavoro'] = "Completato"
-                    salva_db(st.session_state['db_bolle'])
-                    st.rerun()
+                    salva_db(st.session_state.db); st.rerun()
+            else:
+                if st.button("▶️ INIZIA INTERVENTO", type="primary"):
+                    bolla['last_start'] = time.time()
+                    bolla['stato_lavoro'] = "In Corso"
+                    salva_db(st.session_state.db); st.rerun()
 
         st.divider()
 
-        # NOTE PRECEDENTI
-        if bolla['storico_note']:
-            st.warning(f"📝 **NOTE DAI COLLEGHI:**\n{bolla['storico_note']}")
-
-        # EVIDENZA DIGITALE / FOTO (Miglioria 2)
-        st.subheader("📸 Evidenza Digitale Guasto")
-        if bolla['foto_b64']:
-            img_bytes = base64.b64decode(bolla['foto_b64'])
-            st.image(img_bytes, caption="Foto allegata all'intervento", width=300)
-            if st.button("🗑️ Rimuovi Foto"):
-                bolla['foto_b64'] = ""
-                salva_db(st.session_state['db_bolle'])
-                st.rerun()
+        # 2. Foto Guasto
+        st.subheader("📸 Evidenza Digitale")
+        foto_data = bolla.get('foto_b64', "")
+        if foto_data and isinstance(foto_data, str) and len(foto_data) > 10:
+            st.image(base64.b64decode(foto_data), width=300)
+            if st.button("Elimina Foto"):
+                bolla['foto_b64'] = ""; salva_db(st.session_state.db); st.rerun()
         else:
-            foto_upload = st.file_uploader("Scatta o carica una foto del componente", type=['jpg', 'jpeg', 'png'])
-            if foto_upload:
-                bolla['foto_b64'] = comprimi_e_codifica_immagine(foto_upload)
-                salva_db(st.session_state['db_bolle'])
-                st.rerun()
+            up = st.file_uploader("Carica/Scatta Foto", type=['jpg', 'png'])
+            if up:
+                bolla['foto_b64'] = encode_img(up)
+                salva_db(st.session_state.db); st.rerun()
 
+        # 3. Checklist e Ricambi
         st.divider()
+        st.subheader("📋 Task e Magazzino")
+        tasks = CHECKLIST_DATA.get(bolla['categoria'], [])
+        for i, t in enumerate(tasks):
+            key = f"chk_{i}"
+            val = bolla['checklist_state'].get(key, False)
+            bolla['checklist_state'][key] = st.checkbox(f"{t['task']} ({t['risk']})", value=val)
+        
+        bolla['ricambi_usati'] = st.multiselect("Ricambi Utilizzati", RICAMBI_CATALOGO, default=bolla.get('ricambi_usati', []))
 
-        # RICAMBI MAGAZZINO (Miglioria 3)
-        st.subheader("📦 Magazzino e Ricambi")
-        ricambi_selezionati = st.multiselect(
-            "Seleziona i ricambi utilizzati in questo intervento:", 
-            options=CATALOGO_RICAMBI, 
-            default=bolla['ricambi_usati']
-        )
-        bolla['ricambi_usati'] = ricambi_selezionati
+        if st.button("💾 SALVA AVANZAMENTO", use_container_width=True):
+            salva_db(st.session_state.db)
+            st.success("Dati sincronizzati col server!")
 
-        st.divider()
-
-        # CHECKLIST PREDITTIVA
-        st.subheader("📋 Checklist Qualità")
-        tasks = CHECKLIST_PREDITTIVE.get(bolla['categoria'], [])
-        for i, item in enumerate(tasks):
-            is_checked = bolla['checklist_state'].get(str(i), False)
-            chk = st.checkbox(f"{item['task']} (Rischio: {item['risk']})", value=is_checked, key=f"c_{b_id}_{i}")
-            bolla['checklist_state'][str(i)] = chk
-            st.caption(f"_{item['info']}_")
-
-        st.divider()
-
-        # HANDOVER E SALVATAGGIO
-        nuovo_tec = st.selectbox("Passa lavoro a (Handover):", ["Mantieni attuale"] + TECNICI)
-        note_op = st.text_area("Aggiungi note per il prossimo turno:", value=bolla['storico_note'])
-
-        if st.button("💾 AGGIORNA DATI E SALVA", type="primary", use_container_width=True):
-            if nuovo_tec != "Mantieni attuale": bolla['tecnico'] = nuovo_tec
-            bolla['storico_note'] = note_op
-            salva_db(st.session_state['db_bolle'])
-            st.success("Dati aggiornati con successo!")
-            st.rerun()
-
-        if st.button("⬅️ Chiudi Scheda"):
-            st.query_params.clear(); st.rerun()
-
-
-# ------------------------------------------------------------------------------
-# VISTA 2: CRUSCOTTO MANAGER (PC)
-# ------------------------------------------------------------------------------
+# --- VISTA MANAGER ---
 else:
-    st.title("🚚 IVECO Managerial Hub 5.0")
-    
-    tab1, tab2, tab3 = st.tabs(["🆕 Accettazione", "📊 Lavori Attivi", "📈 Cruscotto KPI 5.0"])
+    st.title("🏭 IVECO Managerial Hub 5.0")
+    t1, t2, t3 = st.tabs(["🆕 Accettazione", "📊 Monitor Officina", "📈 Analisi KPI"])
 
-    # --- TAB 1: CREAZIONE BOLLA ---
-    with tab1:
-        col_f, col_qr = st.columns([2, 1])
-        with col_f:
-            with st.form("form_ingresso"):
-                targa = st.text_input("Targa / Modello")
-                categoria = st.selectbox("Categoria", CATEGORIE)
-                tecnico_init = st.selectbox("Tecnico", TECNICI)
-                note_acc = st.text_area("Note Iniziali")
-                submit = st.form_submit_button("Genera Bolla e QR", type="primary")
+    with t1:
+        with st.form("nuova_bolla"):
+            v = st.text_input("Targa / Modello")
+            c = st.selectbox("Categoria", CATEGORIE)
+            t = st.selectbox("Assegna Tecnico", TECNICI)
+            if st.form_submit_button("GENERA QR CODE"):
+                new_id = f"IV-{random.randint(1000,9999)}"
+                st.session_state.db[new_id] = {
+                    "veicolo": v, "categoria": c, "tecnico": t, "stato_lavoro": "In Attesa",
+                    "tempo_sec": 0.0, "checklist_state": {}, "ricambi_usati": [], "foto_b64": ""
+                }
+                salva_db(st.session_state.db)
+                
+                host = st.context.headers.get("Host", "localhost")
+                url = f"https://{host}?bolla_id={new_id}"
+                st.image(get_qr(url), caption=f"QR Bolla {new_id}", width=200)
+                st.info(f"Link Operatore: {url}")
 
-        if submit and targa:
-            id_gen = f"ID-{random.randint(1000, 9999)}"
-            st.session_state['db_bolle'][id_gen] = {
-                "veicolo": targa, "categoria": categoria, "tecnico": tecnico_init,
-                "descrizione": note_acc, "data": datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
-                "checklist_state": {}, "ricambi_usati": [], "storico_note": note_acc,
-                "foto_b64": "", "stato_lavoro": "In Attesa", "tempo_sec": 0.0, "inizio_timestamp": 0.0
-            }
-            salva_db(st.session_state['db_bolle'])
-            
-            host = st.context.headers.get("Host", "localhost:8501")
-            prot = "https" if "streamlit.app" in host else "http"
-            url_lavoro = f"{prot}://{host}?bolla_id={id_gen}"
-            
-            qr = qrcode.QRCode(version=1, box_size=10, border=4)
-            qr.add_data(url_lavoro); qr.make(fit=True)
-            img = qr.make_image(fill_color="black", back_color="white")
-            buf = BytesIO(); img.save(buf, format="PNG")
-            
-            with col_qr:
-                st.success("Bolla Creata!")
-                st.image(buf.getvalue(), width=200)
-                st.download_button("📥 Scarica QR", data=buf.getvalue(), file_name=f"QR_{id_gen}.png", mime="image/png")
-
-    # --- TAB 2: MONITORAGGIO ---
-    with tab2:
-        if st.session_state['db_bolle']:
-            # Creiamo il DataFrame
-            df_view = pd.DataFrame.from_dict(st.session_state['db_bolle'], orient='index')
-            
-            # Gestione sicura dei minuti (evita l'IntCastingNaNError)
-            if 'tempo_sec' in df_view.columns:
-                # fillna(0) trasforma i vuoti in 0, così l'astype(int) non fallisce
-                df_view['Minuti Lavorati'] = (df_view['tempo_sec'].fillna(0) // 60).astype(int)
-            else:
-                df_view['Minuti Lavorati'] = 0
-
-            # Selezioniamo solo le colonne che esistono davvero
-            cols_to_show = ['veicolo', 'categoria', 'tecnico', 'stato_lavoro', 'Minuti Lavorati']
-            present_cols = [c for c in cols_to_show if c in df_view.columns]
-            
-            st.dataframe(df_view[present_cols], use_container_width=True)
-            
-            if st.button("🗑️ Svuota Database", help="Cancella tutto per risolvere errori di compatibilità"):
-                if os.path.exists(DB_FILE):
-                    os.remove(DB_FILE)
-                st.session_state['db_bolle'] = {}
-                st.rerun()
+    with t2:
+        if st.session_state.db:
+            df = pd.DataFrame.from_dict(st.session_state.db, orient='index')
+            df['Minuti'] = (df['tempo_sec'] // 60).astype(int)
+            st.dataframe(df[['veicolo', 'tecnico', 'stato_lavoro', 'Minuti']], use_container_width=True)
+            if st.button("🗑️ RESET DATABASE"):
+                if os.path.exists(DB_FILE): os.remove(DB_FILE)
+                st.session_state.db = {}; st.rerun()
         else:
-            st.info("Nessun lavoro nel database.")
+            st.info("Nessun lavoro attivo.")
 
-    # --- TAB 3: CRUSCOTTO ANALITICO KPI 5.0 (Miglioria 5) ---
-    with tab3:
-        st.markdown("### 🏭 Analisi delle Performance e Sostenibilità")
-        if not st.session_state['db_bolle']:
-            st.warning("Non ci sono dati sufficienti per generare le statistiche. Crea qualche bolla e simulane l'avanzamento.")
-        else:
-            df_kpi = pd.DataFrame.from_dict(st.session_state['db_bolle'], orient='index')
-            df_kpi['Minuti'] = df_kpi['tempo_sec'] / 60.0
-
-            col_k1, col_k2, col_k3 = st.columns(3)
+    with t3:
+        if st.session_state.db:
+            df_kpi = pd.DataFrame.from_dict(st.session_state.db, orient='index')
+            c1, c2 = st.columns(2)
+            c1.markdown("### Stato Lavori")
+            c1.bar_chart(df_kpi['stato_lavoro'].value_counts())
             
-            # Calcolo KPI
-            tot_lavori = len(df_kpi)
-            completati = len(df_kpi[df_kpi['stato_lavoro'] == 'Completato'])
+            # Calcolo Exergia/Sostenibilità
+            eco_count = 0
+            for b in st.session_state.db.values():
+                cat_tasks = CHECKLIST_DATA.get(b['categoria'], [])
+                for i, t in enumerate(cat_tasks):
+                    if t['eco'] and b['checklist_state'].get(f"chk_{i}"):
+                        eco_count += 1
             
-            # Calcolo Azioni Sostenibili (Exergia) effettuate
-            azioni_eco_totali = 0
-            for b_id, data in st.session_state['db_bolle'].items():
-                cat = data.get('categoria', '')
-                tasks = CHECKLIST_PREDITTIVE.get(cat, [])
-                for i, t in enumerate(tasks):
-                    if t['is_eco'] and data.get('checklist_state', {}).get(str(i), False):
-                        azioni_eco_totali += 1
-
-            col_k1.metric("Totale Interventi", tot_lavori)
-            col_k2.metric("Interventi Completati", completati)
-            col_k3.metric("🌱 Azioni Exergia/Eco Applicate", azioni_eco_totali, help="Numero di controlli eseguiti mirati all'ottimizzazione energetica o ambientale.")
-
-            st.divider()
-            
-            col_c1, col_c2 = st.columns(2)
-            
-            with col_c1:
-                st.markdown("**Tempo Medio per Categoria (Minuti)**")
-                if df_kpi['Minuti'].sum() > 0:
-                    tempo_cat = df_kpi.groupby('categoria')['Minuti'].mean()
-                    st.bar_chart(tempo_cat)
-                else:
-                    st.info("Nessun tempo registrato ancora. Premi 'Inizia Lavoro' e 'Sospendi' su una bolla per vedere i dati.")
-
-            with col_c2:
-                st.markdown("**Stato Avanzamento Globale**")
-                stato_counts = df_kpi['stato_lavoro'].value_counts()
-                st.bar_chart(stato_counts, color="#ffaa00")
-
-            st.markdown("**Classifica Ricambi Più Utilizzati**")
-            tutti_ricambi = []
-            for r_list in df_kpi['ricambi_usati']:
-                if isinstance(r_list, list): tutti_ricambi.extend(r_list)
-            
-            if tutti_ricambi:
-                df_ricambi = pd.Series(tutti_ricambi).value_counts()
-                st.bar_chart(df_ricambi, color="#00aa44")
-            else:
-                st.info("Nessun ricambio ancora utilizzato negli interventi.")
+            c2.metric("🌱 Azioni Green Effettuate", eco_count)
+            c2.markdown("### Tempi Medi (Sec)")
+            c2.line_chart(df_kpi.groupby('categoria')['tempo_sec'].mean())
