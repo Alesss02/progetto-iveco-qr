@@ -4,45 +4,60 @@ from io import BytesIO
 import pandas as pd
 import datetime
 import random
+import os
 
 # ==============================================================================
-# CONFIGURAZIONE INIZIALE E DATABASE SIMULATO
+# CONFIGURAZIONE DATABASE PERSISTENTE
 # ==============================================================================
-st.set_page_config(page_title="Smart Bolla 5.0", page_icon="📱", layout="centered")
+DB_FILE = "database_bolle.csv"
 
-# Simulo un database in memoria (session_state) per le bolle e i passaggi di consegne
+def carica_db():
+    if os.path.exists(DB_FILE):
+        try:
+            return pd.read_csv(DB_FILE, index_col=0).to_dict('index')
+        except:
+            return {}
+    return {}
+
+def salva_db(db):
+    if db:
+        df = pd.DataFrame.from_dict(db, orient='index')
+        df.to_csv(DB_FILE)
+
+# Inizializzazione database nello stato della sessione
 if 'db_bolle' not in st.session_state:
-    st.session_state['db_bolle'] = {}
+    st.session_state['db_bolle'] = carica_db()
 
+# ==============================================================================
+# COSTANTI E LOGICA PREDITTIVA
+# ==============================================================================
 CATEGORIE = ['Motore', 'Elettronica', 'Freni', 'Cambio']
 TECNICI = ['Marco', 'Luca', 'Antonio', 'Davide', 'Roberto']
 
-# Il "Cervello" Predittivo: Checklist dinamiche basate sullo storico dei rework
 CHECKLIST_PREDITTIVE = {
     'Motore': [
-        {"task": "Serraggio testata a coppia specifica", "risk_lvl": "ALTO", "motivo": "Rework frequente (30%) - Perdita olio"},
-        {"task": "Controllo guarnizioni coppa olio", "risk_lvl": "MEDIO", "motivo": "Spreco materiale"},
-        {"task": "Recupero Exergia: Ottimizzazione termostato", "risk_lvl": "BASSO", "motivo": "Risparmio energetico"}
+        {"task": "Serraggio testata a coppia specifica", "risk_lvl": "ALTO", "motivo": "Prevenzione perdite olio (Rework storico 30%)"},
+        {"task": "Verifica integrità guarnizioni", "risk_lvl": "MEDIO", "motivo": "Riduzione scarti materiali"},
+        {"task": "Ottimizzazione parametri termici", "risk_lvl": "BASSO", "motivo": "Risparmio Exergia/Energia"}
     ],
     'Cambio': [
-        {"task": "Allineamento ingranaggi e verifica tolleranze", "risk_lvl": "ALTO", "motivo": "Danno critico in caso di errore"},
-        {"task": "Controllo qualità e livello olio trasmissione", "risk_lvl": "MEDIO", "motivo": "Impatto ambientale"}
+        {"task": "Allineamento meccanico ingranaggi", "risk_lvl": "ALTO", "motivo": "Criticità rottura componenti"},
+        {"task": "Controllo livello fluido trasmissione", "risk_lvl": "MEDIO", "motivo": "Impatto ambientale (LCA)"}
     ],
     'Freni': [
-        {"task": "Spessore pastiglie (min. 3mm confermato)", "risk_lvl": "ALTO", "motivo": "Sicurezza veicolo"},
-        {"task": "Spurgo completo liquido freni", "risk_lvl": "ALTO", "motivo": "Rework per frenata spugnosa (45% dei casi)"}
+        {"task": "Misurazione spessore dischi/pastiglie", "risk_lvl": "ALTO", "motivo": "Sicurezza stradale"},
+        {"task": "Spurgo aria impianto frenante", "risk_lvl": "ALTO", "motivo": "Prevenzione 'pedale spugnoso'"}
     ],
     'Elettronica': [
-        {"task": "Reset memoria centralina (DTC)", "risk_lvl": "MEDIO", "motivo": "Falso allarme cliente"},
-        {"task": "Test isolamento cablaggi alta tensione", "risk_lvl": "ALTO", "motivo": "Rischio sicurezza operatore"}
+        {"task": "Diagnosi errori memoria DTC", "risk_lvl": "MEDIO", "motivo": "Evitare ritorni in officina"},
+        {"task": "Controllo cablaggi e connettori", "risk_lvl": "ALTO", "motivo": "Prevenzione cortocircuiti"}
     ]
 }
 
 # ==============================================================================
-# FUNZIONI DI SUPPORTO
+# FUNZIONI UTILI
 # ==============================================================================
 def genera_qr(link):
-    """Genera l'immagine del QR code dal link fornito"""
     qr = qrcode.QRCode(version=1, box_size=10, border=4)
     qr.add_data(link)
     qr.make(fit=True)
@@ -51,123 +66,110 @@ def genera_qr(link):
     img.save(buf, format="PNG")
     return buf
 
-def baseUrl():
-    """Recupera l'URL base dell'app Streamlit per creare il link del QR"""
-    # Funziona sia in locale che deployato su Streamlit Cloud
+def get_base_url():
+    # Gestisce automaticamente l'URL sia in locale che su Streamlit Cloud
     host = st.context.headers.get("Host", "localhost:8501")
-    return f"http://{host}"
+    protocol = "https" if "streamlit.app" in host else "http"
+    return f"{protocol}://{host}"
 
 # ==============================================================================
-# VISTA 2: INTERFACCIA OPERATORE (Si attiva solo se c'è ?bolla_id= nell'URL)
+# INTERFACCIA UTENTE (UI)
 # ==============================================================================
-if 'bolla_id' in st.query_params:
-    b_id = st.query_params['bolla_id']
+st.set_page_config(page_title="Smart Bolla IVECO 5.0", page_icon="🧬", layout="wide")
+
+# CONTROLLO ROUTING: Se l'URL contiene bolla_id, mostra la vista OPERATORE
+query_params = st.query_params
+
+if 'bolla_id' in query_params:
+    b_id = query_params['bolla_id']
     
     if b_id not in st.session_state['db_bolle']:
-        st.error("Bolla non trovata o scaduta.")
-        if st.button("Torna alla Home"):
+        st.error("⚠️ Errore: Bolla non trovata nel database.")
+        if st.button("Torna alla Gestione"):
             st.query_params.clear()
             st.rerun()
     else:
         bolla = st.session_state['db_bolle'][b_id]
         
-        # UI Mobile-Friendly per l'operatore
-        st.markdown(f"## 🛠️ Lavoro: {bolla['veicolo']}")
-        st.info(f"**Categoria:** {bolla['categoria']} | **Creato il:** {bolla['data']} \n\n **Operatore Attuale:** {bolla['tecnico']}")
+        st.markdown(f"# 🛠️ Scheda Lavoro: {bolla['veicolo']}")
+        st.info(f"**ID:** {b_id} | **Tecnico Assegnato:** {bolla['tecnico']}")
         
-        st.divider()
-        st.markdown("### 📋 Smart Checklist (Prevenzione Rework)")
-        st.caption("I controlli seguenti sono generati dall'AI in base agli errori storici più frequenti per questa categoria.")
+        with st.expander("📝 Descrizione Guasto"):
+            st.write(bolla['descrizione'])
+
+        st.subheader("📋 Checklist Qualità Obbligatoria")
+        st.caption("Eseguire i controlli per validare il lavoro e prevenire sprechi.")
         
-        checklist = CHECKLIST_PREDITTIVE[bolla['categoria']]
-        tutti_spuntati = True
-        
-        for i, item in enumerate(checklist):
-            # Colori in base al rischio
-            color = "🔴" if item['risk_lvl'] == "ALTO" else "🟡" if item['risk_lvl'] == "MEDIO" else "🟢"
-            
-            # Checkbox per ogni task
-            checked = st.checkbox(f"{color} **{item['task']}**\n\n*{item['motivo']}*", key=f"chk_{b_id}_{i}")
-            if not checked:
-                tutti_spuntati = False
+        tasks = CHECKLIST_PREDITTIVE.get(bolla['categoria'], [])
+        completato = True
+        for i, item in enumerate(tasks):
+            icon = "🔴" if item['risk_lvl'] == "ALTO" else "🟡"
+            chk = st.checkbox(f"{icon} **{item['task']}** (Rischio: {item['risk_lvl']})", key=f"t_{b_id}_{i}")
+            st.caption(f"_{item['motivo']}_")
+            if not chk: completato = False
 
         st.divider()
-        
-        # Gestione Passaggio di Consegne (Handover)
-        st.markdown("### 🤝 Passaggio di Consegne")
-        nuovo_tecnico = st.selectbox("Se il turno finisce, a chi passi il lavoro?", ["Nessuno (Continuo io)"] + TECNICI, index=0)
-        note_passaggio = st.text_area("Note per il collega (Cosa manca da fare?)")
-        
-        if st.button("💾 Salva Stato Lavoro", use_container_width=True, type="primary"):
-            if not tutti_spuntati:
-                st.warning("⚠️ Non hai spuntato tutti i controlli critici. Rischio di Rework elevato. Stato salvato comunque nel log.")
+        st.subheader("🤝 Passaggio di Consegne")
+        nuovo_t = st.selectbox("Cambia Tecnico (Handover):", ["Nessuno"] + TECNICI)
+        note = st.text_area("Note di avanzamento per il collega:")
+
+        if st.button("💾 Salva e Aggiorna Stato", type="primary", use_container_width=True):
+            if completato:
+                st.success("✅ Protocollo qualità completato correttamente.")
             else:
-                st.success("✅ Ottimo lavoro! Protocollo qualità rispettato.")
+                st.warning("⚠️ Stato salvato con controlli incompleti. Rischio Rework!")
             
-            # Se c'è un passaggio di consegne, aggiorniamo il database
-            if nuovo_tecnico != "Nessuno (Continuo io)":
-                st.session_state['db_bolle'][b_id]['tecnico'] = nuovo_tecnico
-                st.info(f"Lavoro passato a {nuovo_tecnico}. Note registrate.")
+            if nuovo_t != "Nessuno":
+                st.session_state['db_bolle'][b_id]['tecnico'] = nuovo_t
             
-        if st.button("⬅️ Chiudi Scheda Lavoro", use_container_width=True):
+            salva_db(st.session_state['db_bolle'])
+            st.balloons()
+
+        if st.button("🏠 Torna all'Accettazione"):
             st.query_params.clear()
             st.rerun()
 
-# ==============================================================================
-# VISTA 1: VISTA MANAGER / ACCETTAZIONE (Default)
-# ==============================================================================
+# VISTA MANAGER (Default)
 else:
-    st.title("🖨️ Accettazione & Generatore Bolle Smart")
-    st.markdown("Inserisci i dati del veicolo per generare il protocollo di lavoro e il QR Code anticaduta-informazioni.")
-    
-    with st.form("form_bolla"):
-        col1, col2 = st.columns(2)
-        with col1:
-            targa = st.text_input("Targa / Modello Veicolo (es. IVECO S-Way AB123CD)")
-            categoria = st.selectbox("Categoria Lavoro", CATEGORIE)
-        with col2:
-            tecnico = st.selectbox("Assegna a (Tecnico Iniziale)", TECNICI)
-            descrizione = st.text_area("Difetto lamentato dal cliente")
+    st.title("🖨️ Centro Accettazione Smart Bolla")
+    st.markdown("Gestione flussi di lavoro e tracciabilità digitale per l'officina sostenibile.")
+
+    col_form, col_lista = st.columns([1, 1])
+
+    with col_form:
+        st.subheader("🆕 Crea Nuova Bolla")
+        with st.form("nuova_bolla"):
+            targa = st.text_input("Targa o Modello Veicolo", placeholder="Es: IVECO S-WAY - AA123BB")
+            cat = st.selectbox("Categoria Intervento", CATEGORIE)
+            tec = st.selectbox("Tecnico Responsabile", TECNICI)
+            desc = st.text_area("Note Accettazione / Sintomi")
+            crea = st.form_submit_button("Genera Bolla e QR Code", type="primary")
+
+        if crea and targa:
+            id_lavoro = f"B{random.randint(1000, 9999)}"
+            # Salvataggio
+            st.session_state['db_bolle'][id_lavoro] = {
+                "veicolo": targa, "categoria": cat, "tecnico": tec, 
+                "descrizione": desc, "data": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            }
+            salva_db(st.session_state['db_bolle'])
             
-        submit = st.form_submit_button("Genera Smart Bolla & QR Code", type="primary")
-        
-    if submit and targa:
-        # Creazione ID univoco
-        bolla_id = f"ID-{datetime.datetime.now().strftime('%H%M%S')}-{random.randint(10,99)}"
-        
-        # Salvataggio nel "Database"
-        st.session_state['db_bolle'][bolla_id] = {
-            "veicolo": targa,
-            "categoria": categoria,
-            "tecnico": tecnico,
-            "descrizione": descrizione,
-            "data": datetime.datetime.now().strftime('%d/%m/%Y %H:%M')
-        }
-        
-        # Generazione Link e QR
-        link_bolla = f"{baseUrl()}?bolla_id={bolla_id}"
-        qr_img = genera_qr(link_bolla)
-        
-        st.success(f"Bolla {bolla_id} generata con successo!")
-        
-        st.markdown("### Stampa questo QR Code da attaccare al veicolo:")
-        col_qr, col_info = st.columns([1, 2])
-        
-        with col_qr:
-            st.image(qr_img, width=200)
-        with col_info:
-            st.markdown(f"**Veicolo:** {targa}")
-            st.markdown(f"**Assegnato a:** {tecnico}")
-            st.markdown(f"**Reparto:** {categoria}")
-            st.caption("Inquadra il QR Code con il telefono per aprire la Smart Checklist.")
+            # Link e QR
+            url_lavoro = f"{get_base_url()}?bolla_id={id_lavoro}"
+            img_qr = genera_qr(url_lavoro)
             
-            # Bottone di simulazione per testare dal PC
-            st.markdown("---")
-            st.markdown(f"[Simula scansione QR Code cliccando qui]({link_bolla})")
-            
-    # Mostra i lavori attivi in officina
-    if st.session_state['db_bolle']:
-        st.divider()
-        st.subheader("📋 Lavori Attivi in Officina")
-        df_attivi = pd.DataFrame.from_dict(st.session_state['db_bolle'], orient='index')
-        st.dataframe(df_attivi, use_container_width=True)
+            st.success(f"Bolla {id_lavoro} creata!")
+            st.image(img_qr, caption=f"QR Code per {targa}", width=250)
+            st.markdown(f"**Link diretto (da copiare se non puoi usare il cellulare):** [Clicca qui]({url_lavoro})")
+
+    with col_lista:
+        st.subheader("📋 Lavori in corso")
+        if st.session_state['db_bolle']:
+            df = pd.DataFrame.from_dict(st.session_state['db_bolle'], orient='index')
+            st.dataframe(df[['veicolo', 'categoria', 'tecnico', 'data']], use_container_width=True)
+            if st.button("🗑️ Svuota Database (Reset)"):
+                if os.path.exists(DB_FILE): os.remove(DB_FILE)
+                st.session_state['db_bolle'] = {}
+                st.rerun()
+        else:
+            st.info("Nessun lavoro attivo al momento.")
