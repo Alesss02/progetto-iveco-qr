@@ -18,19 +18,34 @@ DB_FILE = "database_bolle.csv"
 def carica_db():
     if os.path.exists(DB_FILE):
         try:
+            import ast
             df = pd.read_csv(DB_FILE, index_col=0)
+            # Riempiamo i buchi (NaN) prima di convertire in dizionario
+            df['tempo_sec'] = df['tempo_sec'].fillna(0.0)
+            df['stato_lavoro'] = df['stato_lavoro'].fillna("In Attesa")
+            
             db_dict = df.to_dict('index')
-            # Riconversione stringhe in oggetti complessi (liste, dizionari)
             for k, v in db_dict.items():
-                if isinstance(v.get('checklist_state'), str):
-                    try: v['checklist_state'] = ast.literal_eval(v['checklist_state'])
-                    except: v['checklist_state'] = {}
-                if isinstance(v.get('ricambi_usati'), str):
-                    try: v['ricambi_usati'] = ast.literal_eval(v['ricambi_usati'])
-                    except: v['ricambi_usati'] = []
+                # Forza checklist_state a essere un dizionario, mai NaN o stringa corrotta
+                if not isinstance(v.get('checklist_state'), str) or v.get('checklist_state') == "" or pd.isna(v.get('checklist_state')):
+                    v['checklist_state'] = {}
+                else:
+                    try:
+                        v['checklist_state'] = ast.literal_eval(v['checklist_state'])
+                    except:
+                        v['checklist_state'] = {}
+                
+                # Forza ricambi_usati a essere una lista
+                if not isinstance(v.get('ricambi_usati'), str) or pd.isna(v.get('ricambi_usati')):
+                    v['ricambi_usati'] = []
+                else:
+                    try:
+                        v['ricambi_usati'] = ast.literal_eval(v['ricambi_usati'])
+                    except:
+                        v['ricambi_usati'] = []
             return db_dict
         except Exception as e:
-            st.error(f"Errore caricamento DB: {e}")
+            st.error(f"Errore critico DB: {e}")
             return {}
     return {}
 
@@ -251,13 +266,25 @@ else:
     # --- TAB 2: MONITORAGGIO ---
     with tab2:
         if st.session_state['db_bolle']:
+            # Creiamo il DataFrame
             df_view = pd.DataFrame.from_dict(st.session_state['db_bolle'], orient='index')
-            df_view['Minuti Lavorati'] = (df_view['tempo_sec'] // 60).astype(int)
-            colonne_visibili = ['veicolo', 'categoria', 'tecnico', 'stato_lavoro', 'Minuti Lavorati']
-            st.dataframe(df_view[colonne_visibili], use_container_width=True)
             
-            if st.button("🗑️ Svuota Database"):
-                if os.path.exists(DB_FILE): os.remove(DB_FILE)
+            # Gestione sicura dei minuti (evita l'IntCastingNaNError)
+            if 'tempo_sec' in df_view.columns:
+                # fillna(0) trasforma i vuoti in 0, così l'astype(int) non fallisce
+                df_view['Minuti Lavorati'] = (df_view['tempo_sec'].fillna(0) // 60).astype(int)
+            else:
+                df_view['Minuti Lavorati'] = 0
+
+            # Selezioniamo solo le colonne che esistono davvero
+            cols_to_show = ['veicolo', 'categoria', 'tecnico', 'stato_lavoro', 'Minuti Lavorati']
+            present_cols = [c for c in cols_to_show if c in df_view.columns]
+            
+            st.dataframe(df_view[present_cols], use_container_width=True)
+            
+            if st.button("🗑️ Svuota Database", help="Cancella tutto per risolvere errori di compatibilità"):
+                if os.path.exists(DB_FILE):
+                    os.remove(DB_FILE)
                 st.session_state['db_bolle'] = {}
                 st.rerun()
         else:
